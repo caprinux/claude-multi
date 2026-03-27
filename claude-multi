@@ -12,6 +12,8 @@ MAIN_CLAUDE_DIR="$HOME/.claude"
 # Shared directories — session data symlinked so all profiles share history
 SHARED_DIRS=(projects sessions)
 SHARED_FILES=(history.jsonl)
+# State file in home directory — contains MCP config, project state, etc.
+MAIN_STATE_FILE="$HOME/.claude.json"
 
 # Colors
 RED=$'\033[0;31m'
@@ -60,12 +62,15 @@ validate_profile_name() {
 get_profile_email() {
     local dir
     dir="$(profile_dir "$1")"
-    local state_file="$dir/.claude.json"
-    if [[ -f "$state_file" ]]; then
+    # Prefer the per-profile .email file (since .claude.json is now shared)
+    if [[ -f "$dir/.email" ]]; then
+        cat "$dir/.email"
+    elif [[ -f "$dir/.claude.json" ]] && [[ ! -L "$dir/.claude.json" ]]; then
+        # Legacy: read from non-symlinked .claude.json (pre-migration)
         python3 -c "
 import json, sys
 try:
-    d = json.load(open('$state_file'))
+    d = json.load(open('$dir/.claude.json'))
     acct = d.get('oauthAccount', {})
     print(acct.get('emailAddress', 'unknown'))
 except: print('unknown')
@@ -179,6 +184,52 @@ setup_shared_symlinks() {
             ln -s "$MAIN_CLAUDE_DIR/$f" "$target"
         fi
     done
+
+    # Symlink .claude.json (MCP config, project state) to the home-directory copy
+    local state_target="$dir/.claude.json"
+    if [[ -L "$state_target" ]]; then
+        local current
+        current="$(readlink "$state_target")"
+        if [[ "$current" != "$MAIN_STATE_FILE" ]]; then
+            rm "$state_target"
+            ln -s "$MAIN_STATE_FILE" "$state_target"
+        fi
+    elif [[ -f "$state_target" ]]; then
+        # Extract email before replacing (in case this came from a login)
+        if [[ ! -f "$dir/.email" ]]; then
+            python3 -c "
+import json
+try:
+    d = json.load(open('$state_target'))
+    email = d.get('oauthAccount', {}).get('emailAddress', '')
+    if email: print(email)
+except: pass
+" 2>/dev/null > "$dir/.email" || true
+            # Remove if empty
+            [[ -s "$dir/.email" ]] || rm -f "$dir/.email"
+        fi
+        # Merge account fields from profile into main state, then replace with symlink
+        if [[ -f "$MAIN_STATE_FILE" ]]; then
+            python3 -c "
+import json
+main = json.load(open('$MAIN_STATE_FILE'))
+profile = json.load(open('$state_target'))
+for key in ('oauthAccount', 'hasAvailableSubscription'):
+    if key in profile and key not in main:
+        main[key] = profile[key]
+with open('$MAIN_STATE_FILE', 'w') as f:
+    json.dump(main, f, indent=2)
+" 2>/dev/null || true
+        else
+            cp "$state_target" "$MAIN_STATE_FILE"
+        fi
+        rm "$state_target"
+        ln -s "$MAIN_STATE_FILE" "$state_target"
+    else
+        # No profile state file — just create the symlink
+        [[ -f "$MAIN_STATE_FILE" ]] || echo '{}' > "$MAIN_STATE_FILE"
+        ln -s "$MAIN_STATE_FILE" "$state_target"
+    fi
 }
 
 launch_profile_shell() {
@@ -260,19 +311,15 @@ except: print('unknown')
     cp "$main_creds" "$dir/.credentials.json"
     chmod 600 "$dir/.credentials.json"
 
-    # Copy account state
+    # Save account email for profile identification
     if [[ -f "$main_state" ]]; then
         python3 -c "
 import json
-main = json.load(open('$main_state'))
-state = {}
-for key in ('oauthAccount', 'hasAvailableSubscription'):
-    if key in main:
-        state[key] = main[key]
-with open('$dir/.claude.json', 'w') as f:
-    json.dump(state, f, indent=2)
-" 2>/dev/null
-        chmod 600 "$dir/.claude.json"
+try:
+    d = json.load(open('$main_state'))
+    print(d.get('oauthAccount', {}).get('emailAddress', 'unknown'))
+except: print('unknown')
+" 2>/dev/null > "$dir/.email"
     fi
 
     # Sync settings
