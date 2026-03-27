@@ -10,7 +10,7 @@ PROFILES_DIR="${CLAUDE_MULTI_HOME:-$HOME/.claude-profiles}"
 MAIN_CLAUDE_DIR="$HOME/.claude"
 
 # Shared directories — session data symlinked so all profiles share history
-SHARED_DIRS=(projects sessions)
+SHARED_DIRS=(projects sessions commands skills plugins)
 SHARED_FILES=(history.jsonl)
 # State file in home directory — contains MCP config, project state, etc.
 MAIN_STATE_FILE="$HOME/.claude.json"
@@ -504,33 +504,15 @@ sync_settings_to_profile() {
     local dir
     dir="$(profile_dir "$name")"
 
-    # Sync settings files
+    # Sync settings files (these are small JSON files, copy is fine)
     for file in settings.json settings.local.json; do
         if [[ -f "$MAIN_CLAUDE_DIR/$file" ]]; then
             cp "$MAIN_CLAUDE_DIR/$file" "$dir/$file"
         fi
     done
 
-    # Sync plugins directory
-    if [[ -d "$MAIN_CLAUDE_DIR/plugins" ]]; then
-        mkdir -p "$dir/plugins"
-        rsync -a --delete "$MAIN_CLAUDE_DIR/plugins/" "$dir/plugins/" 2>/dev/null \
-            || cp -a "$MAIN_CLAUDE_DIR/plugins/"* "$dir/plugins/" 2>/dev/null || true
-    fi
-
-    # Sync skills directory
-    if [[ -d "$MAIN_CLAUDE_DIR/skills" ]]; then
-        mkdir -p "$dir/skills"
-        rsync -a --delete "$MAIN_CLAUDE_DIR/skills/" "$dir/skills/" 2>/dev/null \
-            || cp -a "$MAIN_CLAUDE_DIR/skills/"* "$dir/skills/" 2>/dev/null || true
-    fi
-
-    # Sync commands directory
-    if [[ -d "$MAIN_CLAUDE_DIR/commands" ]]; then
-        mkdir -p "$dir/commands"
-        rsync -a --delete "$MAIN_CLAUDE_DIR/commands/" "$dir/commands/" 2>/dev/null \
-            || cp -a "$MAIN_CLAUDE_DIR/commands/"* "$dir/commands/" 2>/dev/null || true
-    fi
+    # Commands, skills, and plugins are shared via symlinks (setup_shared_symlinks)
+    setup_shared_symlinks "$name"
 }
 
 sync_settings_if_needed() {
