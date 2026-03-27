@@ -181,6 +181,39 @@ setup_shared_symlinks() {
     done
 }
 
+launch_profile_shell() {
+    local name="$1" dir="$2"
+    local shell_name
+    shell_name="$(basename "$SHELL")"
+
+    local rcfile
+    rcfile="$(mktemp)"
+
+    case "$shell_name" in
+        zsh)
+            # zsh: use ZDOTDIR to inject a .zshrc that sources the user's, then prepends
+            local zdir
+            zdir="$(mktemp -d)"
+            cat > "$zdir/.zshrc" <<RCEOF
+[ -f "\$HOME/.zshrc" ] && source "\$HOME/.zshrc"
+PS1="(%F{cyan}${name}%f) \$PS1"
+RCEOF
+            CLAUDE_CONFIG_DIR="$dir" CLAUDE_MULTI_PROFILE="$name" ZDOTDIR="$zdir" exec "$SHELL"
+            ;;
+        bash)
+            cat > "$rcfile" <<RCEOF
+[ -f "\$HOME/.bashrc" ] && source "\$HOME/.bashrc"
+PS1="(${name}) \$PS1"
+RCEOF
+            CLAUDE_CONFIG_DIR="$dir" CLAUDE_MULTI_PROFILE="$name" exec "$SHELL" --rcfile "$rcfile"
+            ;;
+        *)
+            # Fallback: set PS1 directly (may be overwritten by rc files)
+            CLAUDE_CONFIG_DIR="$dir" CLAUDE_MULTI_PROFILE="$name" PS1="(${name}) \$ " exec "$SHELL"
+            ;;
+    esac
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,7 +315,7 @@ cmd_login() {
     echo "  Type ${BOLD}exit${NC} when done."
     echo ""
 
-    CLAUDE_CONFIG_DIR="$dir" PS1="(claude:${name}) \$ " exec "$SHELL"
+    launch_profile_shell "$name" "$dir"
 }
 
 cmd_list() {
@@ -496,7 +529,7 @@ cmd_shell() {
     info "Type 'exit' to return to your normal shell."
     echo ""
 
-    CLAUDE_CONFIG_DIR="$dir" PS1="(claude:${name}) \$ " exec "$SHELL"
+    launch_profile_shell "$name" "$dir"
 }
 
 cmd_help() {
