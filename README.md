@@ -6,7 +6,19 @@ Claude Code ties each session to a single authenticated account. `claude-multi` 
 
 ## How it works
 
-Each profile gets its own config directory at `~/.claude-profiles/<name>/`. When you run Claude Code through a profile, the `CLAUDE_CONFIG_DIR` environment variable points to that directory, giving it fully isolated credentials, sessions, and history. Settings and plugins are synced from your main `~/.claude/` config automatically.
+Each profile gets its own config directory at `~/.claude-profiles/<name>/` with isolated credentials. Session data (conversations, history) is **shared across all profiles** via symlinks to `~/.claude/`, so `--continue` and `--resume` work regardless of which profile you use. Settings and plugins are synced from your main `~/.claude/` config automatically.
+
+### Shared sessions
+
+When a profile is created or launched, `claude-multi` symlinks the following from the profile directory to `~/.claude/`:
+
+- `projects/` — conversation history (JSONL files)
+- `sessions/` — session metadata
+- `history.jsonl` — command history
+
+This means you can start a session with one profile and resume it with another. The resumed session uses whichever profile's credentials you launch with.
+
+If a profile already has local session data (e.g. from a previous version of `claude-multi`), it is automatically migrated to the shared location when symlinks are set up.
 
 ## Install
 
@@ -40,6 +52,9 @@ claude-multi login personal
 # 3. Run them simultaneously in separate terminals
 claude-multi run work           # terminal 1
 claude-multi run personal       # terminal 2
+
+# 4. Resume a session from any profile
+claude-multi run work --continue    # picks up where you left off
 ```
 
 ## Commands
@@ -78,6 +93,9 @@ claude-multi list
 
 # Run Claude with a prompt using a specific profile
 claude-multi run work -p "fix the failing tests"
+
+# Resume the last session with a different profile
+claude-multi run personal --continue
 
 # Open a shell where `claude` is bound to a profile
 claude-multi shell work

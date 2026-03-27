@@ -5,9 +5,13 @@ set -euo pipefail
 # claude-multi — Run multiple Claude Code instances with different accounts
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 PROFILES_DIR="${CLAUDE_MULTI_HOME:-$HOME/.claude-profiles}"
 MAIN_CLAUDE_DIR="$HOME/.claude"
+
+# Shared directories — session data symlinked so all profiles share history
+SHARED_DIRS=(projects sessions)
+SHARED_FILES=(history.jsonl)
 
 # Colors
 RED=$'\033[0;31m'
@@ -118,6 +122,65 @@ except: print('unknown')
 " 2>/dev/null
 }
 
+setup_shared_symlinks() {
+    local name="$1"
+    local dir
+    dir="$(profile_dir "$name")"
+
+    # Ensure shared directories exist in main config
+    for d in "${SHARED_DIRS[@]}"; do
+        mkdir -p "$MAIN_CLAUDE_DIR/$d"
+    done
+
+    # Ensure shared files exist in main config
+    for f in "${SHARED_FILES[@]}"; do
+        [[ -f "$MAIN_CLAUDE_DIR/$f" ]] || touch "$MAIN_CLAUDE_DIR/$f"
+    done
+
+    # Symlink shared directories
+    for d in "${SHARED_DIRS[@]}"; do
+        local target="$dir/$d"
+        if [[ -L "$target" ]]; then
+            # Already a symlink — verify it points to the right place
+            local current
+            current="$(readlink "$target")"
+            if [[ "$current" != "$MAIN_CLAUDE_DIR/$d" ]]; then
+                rm "$target"
+                ln -s "$MAIN_CLAUDE_DIR/$d" "$target"
+            fi
+        elif [[ -d "$target" ]]; then
+            # Real directory exists — migrate any existing data, then replace
+            if [[ "$(ls -A "$target" 2>/dev/null)" ]]; then
+                cp -a "$target/"* "$MAIN_CLAUDE_DIR/$d/" 2>/dev/null || true
+            fi
+            rm -rf "$target"
+            ln -s "$MAIN_CLAUDE_DIR/$d" "$target"
+        else
+            ln -s "$MAIN_CLAUDE_DIR/$d" "$target"
+        fi
+    done
+
+    # Symlink shared files
+    for f in "${SHARED_FILES[@]}"; do
+        local target="$dir/$f"
+        if [[ -L "$target" ]]; then
+            local current
+            current="$(readlink "$target")"
+            if [[ "$current" != "$MAIN_CLAUDE_DIR/$f" ]]; then
+                rm "$target"
+                ln -s "$MAIN_CLAUDE_DIR/$f" "$target"
+            fi
+        elif [[ -f "$target" ]]; then
+            # Append existing data to shared file, then replace
+            cat "$target" >> "$MAIN_CLAUDE_DIR/$f" 2>/dev/null || true
+            rm "$target"
+            ln -s "$MAIN_CLAUDE_DIR/$f" "$target"
+        else
+            ln -s "$MAIN_CLAUDE_DIR/$f" "$target"
+        fi
+    done
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
@@ -184,6 +247,9 @@ with open('$dir/.claude.json', 'w') as f:
         cp "$MAIN_CLAUDE_DIR/settings.json" "$dir/settings.json"
     fi
 
+    # Set up shared session symlinks
+    setup_shared_symlinks "$name"
+
     local sub
     sub="$(get_profile_subscription "$name")"
     ok "Saved profile '${BOLD}${name}${NC}' — ${CYAN}${current_email}${NC} (${sub})"
@@ -205,6 +271,9 @@ cmd_login() {
 
     # Sync plugins/skills/commands
     sync_settings_to_profile "$name" 2>/dev/null || true
+
+    # Set up shared session symlinks
+    setup_shared_symlinks "$name"
 
     info "Opening a shell for profile '${BOLD}${name}${NC}'"
     info "Login from this shell — credentials will be saved directly to the profile."
@@ -263,6 +332,9 @@ cmd_run() {
 
     # Sync settings before running if main config has newer settings
     sync_settings_if_needed "$name"
+
+    # Ensure shared session symlinks are in place
+    setup_shared_symlinks "$name"
 
     local email
     email="$(get_profile_email "$name")"
@@ -416,6 +488,9 @@ cmd_shell() {
     local email
     email="$(get_profile_email "$name")"
 
+    # Ensure shared session symlinks are in place
+    setup_shared_symlinks "$name"
+
     info "Opening shell with CLAUDE_CONFIG_DIR set to profile '${BOLD}${name}${NC}' (${email})"
     info "Any 'claude' commands in this shell will use this profile."
     info "Type 'exit' to return to your normal shell."
@@ -468,6 +543,11 @@ ${BOLD}EXAMPLES${NC}
 
     ${DIM}# Open a shell where all 'claude' commands use the work profile${NC}
     claude-multi shell work
+
+${BOLD}SESSION SHARING${NC}
+    Sessions, conversation history, and command history are shared across all
+    profiles via symlinks to ~/.claude/. This means --continue and --resume
+    work regardless of which profile you use. Credentials remain isolated.
 
 ${BOLD}ENVIRONMENT${NC}
     CLAUDE_MULTI_HOME    Override profiles directory (default: ~/.claude-profiles)
