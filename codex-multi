@@ -300,6 +300,52 @@ RCEOF
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
 
+cmd_default() {
+    local name="${1:-}"
+
+    # No argument: show current default
+    if [[ -z "$name" ]]; then
+        if [[ -f "$PROFILES_DIR/.default" ]]; then
+            local current
+            current="$(cat "$PROFILES_DIR/.default")"
+            local email
+            email="$(get_profile_email "$current")"
+            echo "Default profile: ${BOLD}${current}${NC} (${CYAN}${email}${NC})"
+        else
+            echo "${DIM}No default profile set.${NC} Usage: codex-multi default <profile>"
+        fi
+        return
+    fi
+
+    # --unset: remove default
+    if [[ "$name" == "--unset" ]]; then
+        rm -f "$PROFILES_DIR/.default"
+        ok "Default profile unset. Bare 'codex' will use whatever is in ~/.codex."
+        return
+    fi
+
+    require_profile "$name"
+
+    local dir
+    dir="$(profile_dir "$name")"
+
+    # Copy profile auth into main codex dir
+    if [[ -f "$dir/auth.json" ]]; then
+        mkdir -p "$MAIN_CODEX_DIR"
+        cp "$dir/auth.json" "$MAIN_CODEX_DIR/auth.json"
+    else
+        die "Profile '${name}' has no auth.json. Run: codex-multi login ${name}"
+    fi
+
+    # Store which profile is the default
+    mkdir -p "$PROFILES_DIR"
+    echo "$name" > "$PROFILES_DIR/.default"
+
+    local email
+    email="$(get_profile_email "$name")"
+    ok "Default set to '${BOLD}${name}${NC}' — bare ${CYAN}codex${NC} now uses ${CYAN}${email}${NC}"
+}
+
 cmd_login() {
     local name="${1:-}"
     validate_profile_name "$name"
@@ -606,6 +652,7 @@ ${BOLD}USAGE${NC}
 ${BOLD}ACCOUNT MANAGEMENT${NC}
     login   <profile>              Login directly into a named profile
     save    <profile>              Save currently logged-in account as a named profile
+    default [profile]              Set a profile as the default for bare 'codex'
     logout  <profile>              Logout a profile (invalidate tokens)
     status  [profile]              Show auth status (all profiles if no name given)
     list                           List all profiles with account info
@@ -662,6 +709,7 @@ main() {
     shift 2>/dev/null || true
 
     case "$cmd" in
+        default|d)      cmd_default "$@" ;;
         login|l)        cmd_login "$@" ;;
         save|s)         cmd_save "$@" ;;
         list|ls)        cmd_list "$@" ;;
