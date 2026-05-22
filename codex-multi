@@ -2,18 +2,16 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# claude-multi — Run multiple Claude Code instances with different accounts
+# codex-multi — Run multiple Codex CLI instances with different accounts
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="1.1.0"
-PROFILES_DIR="${CLAUDE_MULTI_HOME:-$HOME/.claude-profiles}"
-MAIN_CLAUDE_DIR="$HOME/.claude"
+VERSION="1.0.0"
+PROFILES_DIR="${CODEX_MULTI_HOME:-$HOME/.codex-profiles}"
+MAIN_CODEX_DIR="$HOME/.codex"
 
-# Shared directories — session data symlinked so all profiles share history
-SHARED_DIRS=(projects sessions commands skills plugins)
+# Shared directories — symlinked so all profiles share sessions/history
+SHARED_DIRS=(sessions memories skills)
 SHARED_FILES=(history.jsonl)
-# State file in home directory — contains MCP config, project state, etc.
-MAIN_STATE_FILE="$HOME/.claude.json"
 
 # Colors
 RED=$'\033[0;31m'
@@ -49,7 +47,7 @@ profile_exists() {
 require_profile() {
     local name="$1"
     if [[ -z "$name" ]]; then die "profile name required"; fi
-    profile_exists "$name" || die "profile '${name}' does not exist. Run: claude-multi list"
+    profile_exists "$name" || die "profile '${name}' does not exist. Run: codex-multi list"
 }
 
 validate_profile_name() {
@@ -62,17 +60,27 @@ validate_profile_name() {
 get_profile_email() {
     local dir
     dir="$(profile_dir "$1")"
-    # Prefer the per-profile .email file (since .claude.json is now shared)
     if [[ -f "$dir/.email" ]]; then
         cat "$dir/.email"
-    elif [[ -f "$dir/.claude.json" ]] && [[ ! -L "$dir/.claude.json" ]]; then
-        # Legacy: read from non-symlinked .claude.json (pre-migration)
+        return
+    fi
+    local auth_file="$dir/auth.json"
+    if [[ -f "$auth_file" ]]; then
         python3 -c "
-import json, sys
+import json, base64
 try:
-    d = json.load(open('$dir/.claude.json'))
-    acct = d.get('oauthAccount', {})
-    print(acct.get('emailAddress', 'unknown'))
+    d = json.load(open('$auth_file'))
+    tokens = d.get('tokens') or {}
+    id_token = tokens.get('id_token', '')
+    if id_token:
+        payload = id_token.split('.')[1]
+        payload += '=' * (4 - len(payload) % 4)
+        info = json.loads(base64.urlsafe_b64decode(payload))
+        print(info.get('email', 'unknown'))
+    elif d.get('OPENAI_API_KEY'):
+        print('api-key')
+    else:
+        print('unknown')
 except: print('unknown')
 " 2>/dev/null
     else
@@ -80,18 +88,16 @@ except: print('unknown')
     fi
 }
 
-get_profile_subscription() {
+get_profile_auth_mode() {
     local dir
     dir="$(profile_dir "$1")"
-    local cred_file="$dir/.credentials.json"
-    if [[ -f "$cred_file" ]]; then
+    local auth_file="$dir/auth.json"
+    if [[ -f "$auth_file" ]]; then
         python3 -c "
-import json, sys
+import json
 try:
-    d = json.load(open('$cred_file'))
-    oauth = d.get('claudeAiOauth', {})
-    sub = oauth.get('subscriptionType', 'unknown')
-    print(sub)
+    d = json.load(open('$auth_file'))
+    print(d.get('auth_mode', 'unknown'))
 except: print('unknown')
 " 2>/dev/null
     else
@@ -102,45 +108,40 @@ except: print('unknown')
 get_profile_status() {
     local dir
     dir="$(profile_dir "$1")"
-    local cred_file="$dir/.credentials.json"
-    if [[ ! -f "$cred_file" ]]; then
+    local auth_file="$dir/auth.json"
+    if [[ ! -f "$auth_file" ]]; then
         echo "no credentials"
         return
     fi
-    # Check if token is expired
     python3 -c "
-import json, time
+import json, base64, time
 try:
-    d = json.load(open('$cred_file'))
-    oauth = d.get('claudeAiOauth', {})
-    expires = oauth.get('expiresAt', 0)
-    has_refresh = bool(oauth.get('refreshToken', ''))
-    if expires == 0:
-        print('no token')
-    elif expires > time.time() * 1000:
-        print('active')
-    elif has_refresh:
-        print('expired (will auto-refresh)')
+    d = json.load(open('$auth_file'))
+    mode = d.get('auth_mode', '')
+    if mode == 'apiKey' and d.get('OPENAI_API_KEY'):
+        print('active (api key)')
+    elif mode in ('chatgpt', 'chatgptAuthTokens'):
+        tokens = d.get('tokens') or {}
+        access = tokens.get('access_token', '')
+        if access:
+            payload = access.split('.')[1]
+            payload += '=' * (4 - len(payload) % 4)
+            info = json.loads(base64.urlsafe_b64decode(payload))
+            exp = info.get('exp', 0)
+            if exp > time.time():
+                print('active')
+            elif tokens.get('refresh_token'):
+                print('expired (will auto-refresh)')
+            else:
+                print('expired')
+        elif tokens.get('refresh_token'):
+            print('has refresh token')
+        else:
+            print('no token')
     else:
-        print('expired')
+        print('unknown')
 except: print('unknown')
 " 2>/dev/null
-}
-
-sync_mcp_config_to_profile() {
-    local dir="$1"
-    [[ -f "$MAIN_STATE_FILE" ]] || return 0
-    [[ -f "$dir/.claude.json" ]] || return 0
-    python3 -c "
-import json, sys
-main = json.load(open('$MAIN_STATE_FILE'))
-profile = json.load(open('$dir/.claude.json'))
-mcp = main.get('mcpServers')
-if mcp is not None:
-    profile['mcpServers'] = mcp
-    with open('$dir/.claude.json', 'w') as f:
-        json.dump(profile, f, indent=2)
-" 2>/dev/null || true
 }
 
 setup_shared_symlinks() {
@@ -150,34 +151,32 @@ setup_shared_symlinks() {
 
     # Ensure shared directories exist in main config
     for d in "${SHARED_DIRS[@]}"; do
-        mkdir -p "$MAIN_CLAUDE_DIR/$d"
+        mkdir -p "$MAIN_CODEX_DIR/$d"
     done
 
     # Ensure shared files exist in main config
     for f in "${SHARED_FILES[@]}"; do
-        [[ -f "$MAIN_CLAUDE_DIR/$f" ]] || touch "$MAIN_CLAUDE_DIR/$f"
+        [[ -f "$MAIN_CODEX_DIR/$f" ]] || touch "$MAIN_CODEX_DIR/$f"
     done
 
     # Symlink shared directories
     for d in "${SHARED_DIRS[@]}"; do
         local target="$dir/$d"
         if [[ -L "$target" ]]; then
-            # Already a symlink — verify it points to the right place
             local current
             current="$(readlink "$target")"
-            if [[ "$current" != "$MAIN_CLAUDE_DIR/$d" ]]; then
+            if [[ "$current" != "$MAIN_CODEX_DIR/$d" ]]; then
                 rm "$target"
-                ln -s "$MAIN_CLAUDE_DIR/$d" "$target"
+                ln -s "$MAIN_CODEX_DIR/$d" "$target"
             fi
         elif [[ -d "$target" ]]; then
-            # Real directory exists — migrate any existing data, then replace
             if [[ "$(ls -A "$target" 2>/dev/null)" ]]; then
-                cp -a "$target/"* "$MAIN_CLAUDE_DIR/$d/" 2>/dev/null || true
+                cp -a "$target/"* "$MAIN_CODEX_DIR/$d/" 2>/dev/null || true
             fi
             rm -rf "$target"
-            ln -s "$MAIN_CLAUDE_DIR/$d" "$target"
+            ln -s "$MAIN_CODEX_DIR/$d" "$target"
         else
-            ln -s "$MAIN_CLAUDE_DIR/$d" "$target"
+            ln -s "$MAIN_CODEX_DIR/$d" "$target"
         fi
     done
 
@@ -187,42 +186,83 @@ setup_shared_symlinks() {
         if [[ -L "$target" ]]; then
             local current
             current="$(readlink "$target")"
-            if [[ "$current" != "$MAIN_CLAUDE_DIR/$f" ]]; then
+            if [[ "$current" != "$MAIN_CODEX_DIR/$f" ]]; then
                 rm "$target"
-                ln -s "$MAIN_CLAUDE_DIR/$f" "$target"
+                ln -s "$MAIN_CODEX_DIR/$f" "$target"
             fi
         elif [[ -f "$target" ]]; then
-            # Append existing data to shared file, then replace
-            cat "$target" >> "$MAIN_CLAUDE_DIR/$f" 2>/dev/null || true
+            cat "$target" >> "$MAIN_CODEX_DIR/$f" 2>/dev/null || true
             rm "$target"
-            ln -s "$MAIN_CLAUDE_DIR/$f" "$target"
+            ln -s "$MAIN_CODEX_DIR/$f" "$target"
         else
-            ln -s "$MAIN_CLAUDE_DIR/$f" "$target"
+            ln -s "$MAIN_CODEX_DIR/$f" "$target"
         fi
     done
+}
 
-    # .claude.json: each profile gets its own copy (contains oauthAccount).
-    # MCP config is synced from the main state file on demand.
-    local state_target="$dir/.claude.json"
-    if [[ -L "$state_target" ]]; then
-        # Migration: break symlink from previous version, create standalone copy
-        local resolved
-        resolved="$(readlink -f "$state_target")"
-        rm "$state_target"
-        if [[ -f "$resolved" ]]; then
-            cp "$resolved" "$state_target"
-        else
-            echo '{}' > "$state_target"
-        fi
-    elif [[ ! -f "$state_target" ]]; then
-        if [[ -f "$MAIN_STATE_FILE" ]]; then
-            cp "$MAIN_STATE_FILE" "$state_target"
-        else
-            echo '{}' > "$state_target"
-        fi
-    fi
-    # Sync MCP servers from main state into profile
-    sync_mcp_config_to_profile "$dir"
+sync_mcp_config_to_profile() {
+    local name="$1"
+    local dir
+    dir="$(profile_dir "$name")"
+    local main_config="$MAIN_CODEX_DIR/config.toml"
+    local profile_config="$dir/config.toml"
+    [[ -f "$main_config" ]] || return 0
+    [[ -f "$profile_config" ]] || return 0
+    python3 -c "
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+import re
+
+with open('$main_config', 'rb') as f:
+    main = tomllib.load(f)
+with open('$profile_config', 'rb') as f:
+    profile = tomllib.load(f)
+
+mcp = main.get('mcp_servers')
+if mcp is None:
+    exit(0)
+
+# Read raw profile config and replace/append mcp_servers section
+with open('$profile_config', 'r') as f:
+    content = f.read()
+
+with open('$main_config', 'r') as f:
+    main_content = f.read()
+
+# Extract all [mcp_servers.*] sections from main config
+mcp_lines = []
+in_mcp = False
+for line in main_content.splitlines():
+    if re.match(r'^\[mcp_servers', line):
+        in_mcp = True
+        mcp_lines.append(line)
+    elif re.match(r'^\[', line) and not re.match(r'^\[mcp_servers', line):
+        in_mcp = False
+    elif in_mcp:
+        mcp_lines.append(line)
+
+# Remove existing mcp_servers sections from profile
+new_lines = []
+in_mcp = False
+for line in content.splitlines():
+    if re.match(r'^\[mcp_servers', line):
+        in_mcp = True
+        continue
+    elif re.match(r'^\[', line) and not re.match(r'^\[mcp_servers', line):
+        in_mcp = False
+    if not in_mcp:
+        new_lines.append(line)
+
+# Append mcp sections
+result = '\n'.join(new_lines).rstrip()
+if mcp_lines:
+    result += '\n\n' + '\n'.join(mcp_lines) + '\n'
+
+with open('$profile_config', 'w') as f:
+    f.write(result)
+" 2>/dev/null || true
 }
 
 launch_profile_shell() {
@@ -235,25 +275,23 @@ launch_profile_shell() {
 
     case "$shell_name" in
         zsh)
-            # zsh: use ZDOTDIR to inject a .zshrc that sources the user's, then prepends
             local zdir
             zdir="$(mktemp -d)"
             cat > "$zdir/.zshrc" <<RCEOF
 [ -f "\$HOME/.zshrc" ] && source "\$HOME/.zshrc"
 PS1="(%F{cyan}${name}%f) \$PS1"
 RCEOF
-            CLAUDE_CONFIG_DIR="$dir" CLAUDE_MULTI_PROFILE="$name" ZDOTDIR="$zdir" exec "$SHELL"
+            CODEX_HOME="$dir" CODEX_MULTI_PROFILE="$name" ZDOTDIR="$zdir" exec "$SHELL"
             ;;
         bash)
             cat > "$rcfile" <<RCEOF
 [ -f "\$HOME/.bashrc" ] && source "\$HOME/.bashrc"
 PS1="(${name}) \$PS1"
 RCEOF
-            CLAUDE_CONFIG_DIR="$dir" CLAUDE_MULTI_PROFILE="$name" exec "$SHELL" --rcfile "$rcfile"
+            CODEX_HOME="$dir" CODEX_MULTI_PROFILE="$name" exec "$SHELL" --rcfile "$rcfile"
             ;;
         *)
-            # Fallback: set PS1 directly (may be overwritten by rc files)
-            CLAUDE_CONFIG_DIR="$dir" CLAUDE_MULTI_PROFILE="$name" PS1="(${name}) \$ " exec "$SHELL"
+            CODEX_HOME="$dir" CODEX_MULTI_PROFILE="$name" PS1="(${name}) \$ " exec "$SHELL"
             ;;
     esac
 }
@@ -266,26 +304,30 @@ cmd_save() {
     local name="${1:-}"
     validate_profile_name "$name"
 
-    # Check that main credentials exist
-    local main_creds="$MAIN_CLAUDE_DIR/.credentials.json"
-    local main_state="$HOME/.claude.json"
-    if [[ ! -f "$main_creds" ]]; then
-        die "No credentials found in ${MAIN_CLAUDE_DIR}. Login first with: claude auth login"
+    local main_auth="$MAIN_CODEX_DIR/auth.json"
+    if [[ ! -f "$main_auth" ]]; then
+        die "No credentials found in ${MAIN_CODEX_DIR}. Login first with: codex login"
     fi
 
-    # Show what account we're saving
-    local current_email="unknown"
-    if [[ -f "$main_state" ]]; then
-        current_email="$(python3 -c "
-import json
+    local current_email
+    current_email="$(python3 -c "
+import json, base64
 try:
-    d = json.load(open('$main_state'))
-    print(d.get('oauthAccount', {}).get('emailAddress', 'unknown'))
+    d = json.load(open('$main_auth'))
+    tokens = d.get('tokens') or {}
+    id_token = tokens.get('id_token', '')
+    if id_token:
+        payload = id_token.split('.')[1]
+        payload += '=' * (4 - len(payload) % 4)
+        info = json.loads(base64.urlsafe_b64decode(payload))
+        print(info.get('email', 'unknown'))
+    elif d.get('OPENAI_API_KEY'):
+        print('api-key')
+    else:
+        print('unknown')
 except: print('unknown')
 " 2>/dev/null)"
-    fi
 
-    # Confirm overwrite if profile exists
     if profile_exists "$name"; then
         local existing_email
         existing_email="$(get_profile_email "$name")"
@@ -300,37 +342,29 @@ except: print('unknown')
     mkdir -p "$dir"
     chmod 700 "$dir"
 
-    # Copy credentials
-    cp "$main_creds" "$dir/.credentials.json"
-    chmod 600 "$dir/.credentials.json"
+    # Copy auth credentials
+    cp "$main_auth" "$dir/auth.json"
+    chmod 600 "$dir/auth.json"
 
-    # Save account email for profile identification
-    if [[ -f "$main_state" ]]; then
-        python3 -c "
-import json
-try:
-    d = json.load(open('$main_state'))
-    print(d.get('oauthAccount', {}).get('emailAddress', 'unknown'))
-except: print('unknown')
-" 2>/dev/null > "$dir/.email"
+    # Save email for quick identification
+    echo "$current_email" > "$dir/.email"
+
+    # Copy config
+    if [[ -f "$MAIN_CODEX_DIR/config.toml" ]]; then
+        cp "$MAIN_CODEX_DIR/config.toml" "$dir/config.toml"
     fi
 
-    # Copy state file (contains oauthAccount for this profile's identity)
-    if [[ -f "$main_state" ]]; then
-        cp "$main_state" "$dir/.claude.json"
+    # Copy rules
+    if [[ -d "$MAIN_CODEX_DIR/rules" ]]; then
+        cp -a "$MAIN_CODEX_DIR/rules" "$dir/" 2>/dev/null || true
     fi
 
-    # Sync settings
-    if [[ -f "$MAIN_CLAUDE_DIR/settings.json" ]]; then
-        cp "$MAIN_CLAUDE_DIR/settings.json" "$dir/settings.json"
-    fi
-
-    # Set up shared session symlinks
+    # Set up shared symlinks
     setup_shared_symlinks "$name"
 
-    local sub
-    sub="$(get_profile_subscription "$name")"
-    ok "Saved profile '${BOLD}${name}${NC}' — ${CYAN}${current_email}${NC} (${sub})"
+    local mode
+    mode="$(get_profile_auth_mode "$name")"
+    ok "Saved profile '${BOLD}${name}${NC}' — ${CYAN}${current_email}${NC} (${mode})"
 }
 
 cmd_list() {
@@ -342,60 +376,56 @@ cmd_list() {
     done < <(find "$PROFILES_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | sort -z)
 
     if [[ ${#profiles[@]} -eq 0 ]]; then
-        echo "${DIM}No profiles yet. Create one with:${NC} claude-multi save <name>"
+        echo "${DIM}No profiles yet. Create one with:${NC} codex-multi save <name>"
         return
     fi
 
     echo ""
-    printf "  ${BOLD}%-20s %-35s %-15s %-25s${NC}\n" "PROFILE" "EMAIL" "PLAN" "STATUS"
-    printf "  %-20s %-35s %-15s %-25s\n" "───────" "─────" "────" "──────"
+    printf "  ${BOLD}%-20s %-35s %-15s %-25s${NC}\n" "PROFILE" "EMAIL" "AUTH MODE" "STATUS"
+    printf "  %-20s %-35s %-15s %-25s\n" "───────" "─────" "─────────" "──────"
 
     for name in "${profiles[@]}"; do
-        local email sub status
+        local email mode status
         email="$(get_profile_email "$name")"
-        sub="$(get_profile_subscription "$name")"
+        mode="$(get_profile_auth_mode "$name")"
         status="$(get_profile_status "$name")"
 
         local status_color="$NC"
         case "$status" in
             active*)                status_color="$GREEN" ;;
-            "expired (will auto"*)  status_color="$YELLOW" ;;
+            "expired (will auto"*|"has refresh"*) status_color="$YELLOW" ;;
             expired|"no token"|"no credentials") status_color="$RED" ;;
         esac
 
         printf "  %-20s %-35s %-15s ${status_color}%-25s${NC}\n" \
-            "$name" "$email" "$sub" "$status"
+            "$name" "$email" "$mode" "$status"
     done
     echo ""
 }
 
 cmd_run() {
     local name="${1:-}"
-    if [[ -z "$name" ]]; then die "usage: claude-multi run <profile> [claude args...]"; fi
+    if [[ -z "$name" ]]; then die "usage: codex-multi run <profile> [codex args...]"; fi
     require_profile "$name"
     shift
 
     local dir
     dir="$(profile_dir "$name")"
 
-    # Sync settings before running if main config has newer settings
-    sync_settings_if_needed "$name"
-
-    # Ensure shared session symlinks are in place
+    sync_config_if_needed "$name"
     setup_shared_symlinks "$name"
 
     local email
     email="$(get_profile_email "$name")"
-    info "Running Claude Code as ${CYAN}${email}${NC} (profile: ${BOLD}${name}${NC})"
+    info "Running Codex as ${CYAN}${email}${NC} (profile: ${BOLD}${name}${NC})"
     echo ""
 
-    exec env CLAUDE_CONFIG_DIR="$dir" claude "$@"
+    exec env CODEX_HOME="$dir" codex "$@"
 }
 
 cmd_status() {
     local name="${1:-}"
     if [[ -z "$name" ]]; then
-        # Show status for all profiles
         cmd_list
         return
     fi
@@ -406,7 +436,7 @@ cmd_status() {
 
     info "Auth status for profile '${BOLD}${name}${NC}':"
     echo ""
-    CLAUDE_CONFIG_DIR="$dir" claude auth status 2>&1 || true
+    CODEX_HOME="$dir" codex login status 2>&1 || true
 }
 
 cmd_delete() {
@@ -424,9 +454,8 @@ cmd_delete() {
     read -rp "Type the profile name to confirm: " confirm
     [[ "$confirm" == "$name" ]] || die "Aborted."
 
-    # Logout first to invalidate tokens
     info "Logging out..."
-    CLAUDE_CONFIG_DIR="$dir" claude auth logout 2>/dev/null || true
+    CODEX_HOME="$dir" codex logout 2>/dev/null || true
 
     rm -rf "$dir"
     ok "Profile '${name}' deleted."
@@ -434,21 +463,21 @@ cmd_delete() {
 
 cmd_logout() {
     local name="${1:-}"
-    if [[ -z "$name" ]]; then die "usage: claude-multi logout <profile>"; fi
+    if [[ -z "$name" ]]; then die "usage: codex-multi logout <profile>"; fi
     require_profile "$name"
 
     local dir
     dir="$(profile_dir "$name")"
 
     info "Logging out profile '${BOLD}${name}${NC}'..."
-    CLAUDE_CONFIG_DIR="$dir" claude auth logout
+    CODEX_HOME="$dir" codex logout
     ok "Profile '${name}' logged out."
 }
 
 cmd_rename() {
     local old="${1:-}"
     local new="${2:-}"
-    if [[ -z "$old" || -z "$new" ]]; then die "usage: claude-multi rename <old-name> <new-name>"; fi
+    if [[ -z "$old" || -z "$new" ]]; then die "usage: codex-multi rename <old-name> <new-name>"; fi
     validate_profile_name "$old"
     validate_profile_name "$new"
     require_profile "$old"
@@ -460,7 +489,7 @@ cmd_rename() {
 
 cmd_sync() {
     local name="${1:-}"
-    if [[ -z "$name" ]]; then die "usage: claude-multi sync <profile>"; fi
+    if [[ -z "$name" ]]; then die "usage: codex-multi sync <profile>"; fi
     require_profile "$name"
 
     sync_settings_to_profile "$name"
@@ -472,45 +501,35 @@ sync_settings_to_profile() {
     local dir
     dir="$(profile_dir "$name")"
 
-    # Sync settings files (these are small JSON files, copy is fine)
-    for file in settings.json settings.local.json; do
-        if [[ -f "$MAIN_CLAUDE_DIR/$file" ]]; then
-            cp "$MAIN_CLAUDE_DIR/$file" "$dir/$file"
-        fi
-    done
+    if [[ -f "$MAIN_CODEX_DIR/config.toml" ]]; then
+        cp "$MAIN_CODEX_DIR/config.toml" "$dir/config.toml"
+    fi
+    if [[ -d "$MAIN_CODEX_DIR/rules" ]]; then
+        cp -a "$MAIN_CODEX_DIR/rules" "$dir/" 2>/dev/null || true
+    fi
 
-    # Commands, skills, and plugins are shared via symlinks (setup_shared_symlinks)
     setup_shared_symlinks "$name"
 }
 
-sync_settings_if_needed() {
+sync_config_if_needed() {
     local name="$1"
     local dir
     dir="$(profile_dir "$name")"
 
-    # Only sync if main settings.json is newer than profile's
-    if [[ -f "$MAIN_CLAUDE_DIR/settings.json" ]]; then
-        if [[ ! -f "$dir/settings.json" ]] || [[ "$MAIN_CLAUDE_DIR/settings.json" -nt "$dir/settings.json" ]]; then
-            cp "$MAIN_CLAUDE_DIR/settings.json" "$dir/settings.json"
-        fi
-    fi
-    if [[ -f "$MAIN_CLAUDE_DIR/settings.local.json" ]]; then
-        if [[ ! -f "$dir/settings.local.json" ]] || [[ "$MAIN_CLAUDE_DIR/settings.local.json" -nt "$dir/settings.local.json" ]]; then
-            cp "$MAIN_CLAUDE_DIR/settings.local.json" "$dir/settings.local.json"
-        fi
-    fi
+    # Sync MCP servers from main config
+    sync_mcp_config_to_profile "$name"
 }
 
 cmd_which() {
     local name="${1:-}"
-    if [[ -z "$name" ]]; then die "usage: claude-multi which <profile>"; fi
+    if [[ -z "$name" ]]; then die "usage: codex-multi which <profile>"; fi
     require_profile "$name"
     echo "$(profile_dir "$name")"
 }
 
 cmd_shell() {
     local name="${1:-}"
-    if [[ -z "$name" ]]; then die "usage: claude-multi shell <profile>"; fi
+    if [[ -z "$name" ]]; then die "usage: codex-multi shell <profile>"; fi
     require_profile "$name"
 
     local dir
@@ -518,11 +537,10 @@ cmd_shell() {
     local email
     email="$(get_profile_email "$name")"
 
-    # Ensure shared session symlinks are in place
     setup_shared_symlinks "$name"
 
-    info "Opening shell with CLAUDE_CONFIG_DIR set to profile '${BOLD}${name}${NC}' (${email})"
-    info "Any 'claude' commands in this shell will use this profile."
+    info "Opening shell with CODEX_HOME set to profile '${BOLD}${name}${NC}' (${email})"
+    info "Any 'codex' commands in this shell will use this profile."
     info "Type 'exit' to return to your normal shell."
     echo ""
 
@@ -532,10 +550,10 @@ cmd_shell() {
 cmd_help() {
     cat <<EOF
 
-${BOLD}claude-multi${NC} v${VERSION} — Run multiple Claude Code instances with different accounts
+${BOLD}codex-multi${NC} v${VERSION} — Run multiple Codex CLI instances with different accounts
 
 ${BOLD}USAGE${NC}
-    claude-multi <command> [args]
+    codex-multi <command> [args]
 
 ${BOLD}ACCOUNT MANAGEMENT${NC}
     save    <profile>              Save currently logged-in account as a named profile
@@ -545,38 +563,37 @@ ${BOLD}ACCOUNT MANAGEMENT${NC}
     delete  <profile>              Delete a profile and its credentials
     rename  <old> <new>            Rename a profile
 
-${BOLD}RUNNING CLAUDE${NC}
-    run     <profile> [args...]    Run Claude Code using a specific profile
+${BOLD}RUNNING CODEX${NC}
+    run     <profile> [args...]    Run Codex using a specific profile
     shell   <profile>              Open a subshell with the profile's config active
 
 ${BOLD}CONFIGURATION${NC}
-    sync    <profile>              Sync settings/plugins from main ~/.claude to profile
+    sync    <profile>              Sync config/rules from main ~/.codex to profile
     which   <profile>              Print the config directory path for a profile
 
 ${BOLD}EXAMPLES${NC}
     ${DIM}# Save the currently logged-in account as a profile${NC}
-    claude-multi save personal
+    codex-multi save personal
 
-    ${DIM}# Run Claude with your work account${NC}
-    claude-multi run work
+    ${DIM}# Run Codex with your work account${NC}
+    codex-multi run work
 
-    ${DIM}# Run Claude with personal account in a specific directory${NC}
-    claude-multi run personal -p "fix the tests"
+    ${DIM}# Run Codex with personal account and a prompt${NC}
+    codex-multi run personal "fix the tests"
 
     ${DIM}# Run two instances simultaneously (in separate terminals)${NC}
-    claude-multi run work           ${DIM}# terminal 1${NC}
-    claude-multi run personal       ${DIM}# terminal 2${NC}
+    codex-multi run work           ${DIM}# terminal 1${NC}
+    codex-multi run personal       ${DIM}# terminal 2${NC}
 
-    ${DIM}# Open a shell where all 'claude' commands use the work profile${NC}
-    claude-multi shell work
+    ${DIM}# Open a shell where all 'codex' commands use the work profile${NC}
+    codex-multi shell work
 
 ${BOLD}SESSION SHARING${NC}
-    Sessions, conversation history, and command history are shared across all
-    profiles via symlinks to ~/.claude/. This means --continue and --resume
-    work regardless of which profile you use. Credentials remain isolated.
+    Sessions, conversation history, and memories are shared across all
+    profiles via symlinks to ~/.codex/. Credentials remain isolated.
 
 ${BOLD}ENVIRONMENT${NC}
-    CLAUDE_MULTI_HOME    Override profiles directory (default: ~/.claude-profiles)
+    CODEX_MULTI_HOME    Override profiles directory (default: ~/.codex-profiles)
 
 EOF
 }
@@ -586,7 +603,7 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────────
 
 main() {
-    need_cmd claude
+    need_cmd codex
     need_cmd python3
 
     local cmd="${1:-help}"
@@ -604,8 +621,8 @@ main() {
         which)          cmd_which "$@" ;;
         shell|sh)       cmd_shell "$@" ;;
         help|--help|-h) cmd_help ;;
-        version|--version|-v) echo "claude-multi v${VERSION}" ;;
-        *)              die "unknown command '${cmd}'. Run 'claude-multi help' for usage." ;;
+        version|--version|-v) echo "codex-multi v${VERSION}" ;;
+        *)              die "unknown command '${cmd}'. Run 'codex-multi help' for usage." ;;
     esac
 }
 

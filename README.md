@@ -1,8 +1,8 @@
-# claude-multi
+# claude-multi / codex-multi
 
-Run multiple Claude Code instances with different accounts on the same machine, simultaneously.
+Run multiple Claude Code or Codex CLI instances with different accounts on the same machine, simultaneously.
 
-Claude Code ties each session to a single authenticated account. `claude-multi` manages isolated profiles so you can run multiple accounts concurrently without conflicts.
+Both tools tie each session to a single authenticated account. `claude-multi` and `codex-multi` manage isolated profiles so you can run multiple accounts concurrently without conflicts.
 
 ## How it works
 
@@ -26,28 +26,30 @@ If a profile already has local session data (e.g. from a previous version of `cl
 # Clone and symlink to PATH
 git clone https://github.com/caprinux/claude-multi.git
 ln -s "$(pwd)/claude-multi/claude-multi" /usr/local/bin/claude-multi
+ln -s "$(pwd)/claude-multi/codex-multi" /usr/local/bin/codex-multi
 
-# Or just copy it
+# Or just copy them
 curl -o /usr/local/bin/claude-multi https://raw.githubusercontent.com/caprinux/claude-multi/main/claude-multi
-chmod +x /usr/local/bin/claude-multi
+curl -o /usr/local/bin/codex-multi https://raw.githubusercontent.com/caprinux/claude-multi/main/codex-multi
+chmod +x /usr/local/bin/claude-multi /usr/local/bin/codex-multi
 ```
 
 ### Requirements
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
-- `python3` (for reading JSON config files)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI and/or [Codex CLI](https://github.com/openai/codex) installed
+- `python3` (for reading config files)
 - `bash` 4+
 
 ## Quick start
 
 ```bash
-# 1. Login to your first account
-claude-multi login work
-# This opens a shell. Run `claude` and use `/login`, then type `exit`.
+# 1. Login to your first account normally, then save it
+claude auth login
+claude-multi save work
 
-# 2. Login to your second account
-claude-multi login personal
-# Same flow — login, then exit.
+# 2. Login to your second account, then save it
+claude auth login
+claude-multi save personal
 
 # 3. Run them simultaneously in separate terminals
 claude-multi run work           # terminal 1
@@ -63,7 +65,6 @@ claude-multi run work --continue    # picks up where you left off
 
 | Command | Description |
 |---|---|
-| `login <profile>` | Create a profile and open a shell to login. Credentials are saved directly to the profile. |
 | `save <profile>` | Save the currently logged-in account (from `~/.claude/`) as a named profile. |
 | `logout <profile>` | Logout a profile and invalidate its tokens. |
 | `status [profile]` | Show auth status for one or all profiles. |
@@ -116,14 +117,32 @@ claude-multi status work
 |---|---|
 | `CLAUDE_MULTI_HOME` | Override the profiles directory (default: `~/.claude-profiles`) |
 
-## How login works
+---
 
-On headless/remote servers, `claude auth login` can have issues with the OAuth callback (it starts a localhost listener that your browser can't reach). `claude-multi login` works around this by:
+## codex-multi
 
-1. Creating an isolated profile directory
-2. Opening a shell with `CLAUDE_CONFIG_DIR` set to that directory
-3. You run `claude` from that shell and use `/login` (the interactive TUI handles the auth code paste correctly)
-4. Credentials are written directly to the profile directory
+`codex-multi` works the same way as `claude-multi` but for OpenAI's Codex CLI. It uses the `CODEX_HOME` environment variable to isolate profiles.
+
+### Quick start
+
+```bash
+# 1. Login normally, then save as a profile
+codex login
+codex-multi save personal
+
+# 3. Run with a specific profile
+codex-multi run work
+codex-multi run personal "fix the tests"
+
+# 4. List profiles
+codex-multi list
+```
+
+### Environment variables
+
+| Variable | Description |
+|---|---|
+| `CODEX_MULTI_HOME` | Override the profiles directory (default: `~/.codex-profiles`) |
 
 ## License
 
