@@ -300,6 +300,53 @@ RCEOF
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
 
+cmd_login() {
+    local name="${1:-}"
+    validate_profile_name "$name"
+
+    local dir
+    dir="$(profile_dir "$name")"
+    mkdir -p "$dir"
+    chmod 700 "$dir"
+
+    # Set up shared session symlinks and config
+    setup_shared_symlinks "$name"
+    if [[ -f "$MAIN_CODEX_DIR/config.toml" ]]; then
+        cp "$MAIN_CODEX_DIR/config.toml" "$dir/config.toml"
+    fi
+
+    info "Logging into profile '${BOLD}${name}${NC}'..."
+    echo ""
+    CODEX_HOME="$dir" codex login
+
+    # Capture email after successful login
+    if [[ -f "$dir/auth.json" ]]; then
+        local email
+        email="$(python3 -c "
+import json, base64
+try:
+    d = json.load(open('$dir/auth.json'))
+    tokens = d.get('tokens') or {}
+    id_token = tokens.get('id_token', '')
+    if id_token:
+        payload = id_token.split('.')[1]
+        payload += '=' * (4 - len(payload) % 4)
+        info = json.loads(base64.urlsafe_b64decode(payload))
+        print(info.get('email', 'unknown'))
+    elif d.get('OPENAI_API_KEY'):
+        print('api-key')
+    else:
+        print('unknown')
+except: print('unknown')
+" 2>/dev/null)"
+        echo "$email" > "$dir/.email"
+        echo ""
+        ok "Logged into profile '${BOLD}${name}${NC}' — ${CYAN}${email}${NC}"
+    else
+        warn "Login may not have completed. Run 'codex-multi status ${name}' to check."
+    fi
+}
+
 cmd_save() {
     local name="${1:-}"
     validate_profile_name "$name"
@@ -556,6 +603,7 @@ ${BOLD}USAGE${NC}
     codex-multi <command> [args]
 
 ${BOLD}ACCOUNT MANAGEMENT${NC}
+    login   <profile>              Login directly into a named profile
     save    <profile>              Save currently logged-in account as a named profile
     logout  <profile>              Logout a profile (invalidate tokens)
     status  [profile]              Show auth status (all profiles if no name given)
@@ -572,7 +620,10 @@ ${BOLD}CONFIGURATION${NC}
     which   <profile>              Print the config directory path for a profile
 
 ${BOLD}EXAMPLES${NC}
-    ${DIM}# Save the currently logged-in account as a profile${NC}
+    ${DIM}# Login directly into a profile${NC}
+    codex-multi login work
+
+    ${DIM}# Or save the currently logged-in account as a profile${NC}
     codex-multi save personal
 
     ${DIM}# Run Codex with your work account${NC}
@@ -610,6 +661,7 @@ main() {
     shift 2>/dev/null || true
 
     case "$cmd" in
+        login|l)        cmd_login "$@" ;;
         save|s)         cmd_save "$@" ;;
         list|ls)        cmd_list "$@" ;;
         run|r)          cmd_run "$@" ;;

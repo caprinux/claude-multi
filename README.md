@@ -43,13 +43,11 @@ chmod +x /usr/local/bin/claude-multi /usr/local/bin/codex-multi
 ## Quick start
 
 ```bash
-# 1. Login to your first account normally, then save it
-claude auth login
-claude-multi save work
+# 1. Login directly into a named profile
+claude-multi login work
 
-# 2. Login to your second account, then save it
-claude auth login
-claude-multi save personal
+# 2. Login to a second profile (credentials are isolated)
+claude-multi login personal
 
 # 3. Run them simultaneously in separate terminals
 claude-multi run work           # terminal 1
@@ -65,6 +63,7 @@ claude-multi run work --continue    # picks up where you left off
 
 | Command | Description |
 |---|---|
+| `login <profile>` | Login directly into a named profile. |
 | `save <profile>` | Save the currently logged-in account (from `~/.claude/`) as a named profile. |
 | `logout <profile>` | Logout a profile and invalidate its tokens. |
 | `status [profile]` | Show auth status for one or all profiles. |
@@ -126,9 +125,11 @@ claude-multi status work
 ### Quick start
 
 ```bash
-# 1. Login normally, then save as a profile
-codex login
-codex-multi save personal
+# 1. Login directly into a named profile
+codex-multi login work
+
+# 2. Login to a second profile
+codex-multi login personal
 
 # 3. Run with a specific profile
 codex-multi run work
