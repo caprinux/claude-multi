@@ -303,6 +303,7 @@ RCEOF
 cmd_login() {
     local name="${1:-}"
     validate_profile_name "$name"
+    shift
 
     local dir
     dir="$(profile_dir "$name")"
@@ -317,7 +318,7 @@ cmd_login() {
 
     info "Logging into profile '${BOLD}${name}${NC}'..."
     echo ""
-    CODEX_HOME="$dir" codex login
+    CODEX_HOME="$dir" codex login "$@"
 
     # Capture email after successful login
     if [[ -f "$dir/auth.json" ]]; then
